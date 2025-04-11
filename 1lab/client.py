@@ -2,6 +2,7 @@ import socket
 import logging
 import os
 from datetime import datetime
+import json  # Импорт библиотеки json
 
 # Настройка системы логирования
 log_file_path = 'client_activity.log'
@@ -29,11 +30,15 @@ def archive_data(retrieved_data, log_directory, user_command):
 
     # Приводим команду к безопасному формату для имени файла
     valid_command = user_command.replace(" ", "_").replace(":", "-")
-    file_title = current_time.strftime(f"%H-%M-%S_{valid_command}.dat")  # Изменен формат и расширение
+    file_title = current_time.strftime(f"%H-%M-%S_{valid_command}.json")  # Изменен формат и расширение
     full_path = os.path.join(log_directory, file_title)
     try:
-        with open(full_path, 'wb') as destination:
-            destination.write(retrieved_data)
+        with open(full_path, 'w', encoding='utf-8') as destination:  # Открываем в текстовом режиме с указанием кодировки
+            try:
+                json_data = json.loads(retrieved_data.decode('utf-8'))  # Пытаемся преобразовать в JSON
+                json.dump(json_data, destination, indent=4, ensure_ascii=False)  # Записываем в файл в формате JSON
+            except json.JSONDecodeError:  # Если не удалось преобразовать в JSON, записываем как есть
+                destination.write(retrieved_data.decode('utf-8'))
         print(f"Данные успешно записаны в файл: {full_path}")
         logging.info(f"Данные заархивированы в: {full_path}")
     except IOError as error_info:
@@ -86,27 +91,3 @@ def interact_with_server(user_input):
     except Exception as master_error:
         print(f"Непредвиденная ошибка: {master_error}")
         logging.error(f"Непредвиденная ошибка: {master_error}")
-
-
-def application_entry():
-    """Главная функция клиента."""
-    print("Клиент запущен, ожидание подключения к серверу...")
-    while True:
-        print("\nДоступные действия:")
-        print("update - запрос информации о процессах")
-        print("send_signal <pid> <sig> - отправка сигнала процессу (только root)")
-        print("terminate - завершение работы")
-
-        user_selection = input("Введите команду: ").strip()
-
-        if user_selection == "terminate":
-            print("Завершение работы клиентского приложения...")
-            break
-        elif user_selection == "update" or user_selection.startswith("send_signal"):
-            interact_with_server(user_selection)
-        else:
-            print("Введена некорректная команда. Повторите попытку.")
-
-
-if __name__ == "__main__":
-    application_entry()
