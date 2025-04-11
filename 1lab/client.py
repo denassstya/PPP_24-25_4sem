@@ -93,7 +93,7 @@ def application_entry():
     print("Клиент запущен, ожидание подключения к серверу...")
     while True:
         print("\nДоступные действия:")
-        print("request_processes - запрос информации о процессах")
+        print("update - запрос информации о процессах")
         print("send_signal <pid> <sig> - отправка сигнала процессу (только root)")
         print("terminate - завершение работы")
 
@@ -102,7 +102,7 @@ def application_entry():
         if user_selection == "terminate":
             print("Завершение работы клиентского приложения...")
             break
-        elif user_selection == "request_processes" or user_selection.startswith("send_signal"):
+        elif user_selection == "update" or user_selection.startswith("send_signal"):
             interact_with_server(user_selection)
         else:
             print("Введена некорректная команда. Повторите попытку.")
