@@ -1,113 +1,131 @@
-import socket
-import os
 import json
-import xml.etree.ElementTree as ET
+import socket
 import logging
-import signal
+import psutil
+import os
 
-#Настройка логирования
-logging.basicConfig(filename="server.log", level=logging.INFO, format="%(asctime)s - %(message)s")
+# Настройка логирования
+logging.basicConfig(filename='server.log', level=logging.INFO,
+                    format='%(asctime)s - %(message)s')
 
-HOST = "127.0.0.1"
-PORT = 65432
-DATA_FORMAT = "json"  #Можно менять на "xml"
+
+# Логируются только сообщения уровня INFO и выше.
 
 
 def get_process_info():
-    """Собирает информацию о запущенных процессах"""
+    """Получает информацию о всех процессах и
+       возвращает её в виде списка словарей."""
     processes = []
-    for proc in os.popen("ps aux").readlines():
-        parts = proc.split()
-        if len(parts) > 10:
-            processes.append({
-                "USER": parts[0],
-                "PID": parts[1],
-                "CPU": parts[2],
-                "MEM": parts[3],
-                "COMMAND": " ".join(parts[10:])
-            })
-
-    if DATA_FORMAT == "json":
-        with open("processes.json", "w") as f:
-            json.dump(processes, f, indent=4)
-        logging.info("Информация о процессах сохранена в JSON")
-
-    elif DATA_FORMAT == "xml":
-        root = ET.Element("Processes")
-        for proc in processes:
-            proc_elem = ET.SubElement(root, "Process")
-            for key, value in proc.items():
-                child = ET.SubElement(proc_elem, key)
-                child.text = value
-        tree = ET.ElementTree(root)
-        tree.write("processes.xml")
-        logging.info("Информация о процессах сохранена в XML")
+    # Итерируется по всем процессам и получает их PID, имя и статус.
+    for proc in psutil.process_iter(['pid', 'name', 'status']):
+        try:
+            process_info = proc.info
+            processes.append(process_info)
+        # Игнорируем процессы, которые недоступны
+        # (например, завершенные или системные).
+        except (psutil.NoSuchProcess, psutil.AccessDenied,
+                psutil.ZombieProcess):
+            continue
+    return processes
 
 
-def handle_signal(pid, sig):
-    """Отправка сигнала процессу"""
-    signal_dict = {
-        "SIGTERM": signal.SIGTERM,
-        "SIGKILL": signal.SIGKILL,
-        "SIGSTOP": signal.SIGSTOP,
-        "SIGCONT": signal.SIGCONT
-    }
-
+def save_to_json(data, filename='processes.json'):
+    """Сохраняет данные в JSON файл."""
     try:
-        if sig not in signal_dict:
-            return f"Ошибка: неизвестный сигнал {sig}"
-
-        os.kill(int(pid), signal_dict[sig])
-        logging.info(f"Отправлен сигнал {sig} процессу {pid}")
-        return f"Сигнал {sig} отправлен процессу {pid}"
+        with open(filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        logging.info(f"Данные успешно сохранены в файл {filename}")
     except Exception as e:
-        logging.error(f"Ошибка при отправке сигнала: {e}")
-        return str(e)
+        logging.error(f"Ошибка при сохранении данных в файл {filename}: {e}")
 
-
-def start_server():
-    """Запуск сервера"""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.bind((HOST, PORT))
-        server.listen()
-        logging.info(f"Сервер запущен на {HOST}:{PORT}")
-        print(f"Сервер слушает на {HOST}:{PORT}")
-
+def handle_client(conn, addr):
+    """Обрабатывает запросы клиента."""
+    logging.info(f"Подключен клиент: {addr}")
+    print(f"Клиент {addr} подключен.")
+    try:
         while True:
-            conn, addr = server.accept()
-            with conn:
-                logging.info(f"Подключение от {addr}")
-                print(f"Подключение от {addr}")
+            try:
+                # Получаем команду от клиента
+                command = conn.recv(1024).decode('utf-8').strip()
+                if not command:
+                    break
 
-                while True:
-                    data = conn.recv(1024).decode().strip()
-                    if not data:
-                        break
+                if command == "update":
+                    print(f"Клиент {addr} запросил обновление информации о процессах.")
+                    processes = get_process_info()
+                    save_to_json(processes)
 
-                    logging.info(f"Получена команда: {data}")
+                    try:
+                        with open('processes.json', 'rb') as f:
+                            file_data = f.read()
+                        conn.sendall(file_data)  # Отправляем данные
+                        print(f"Файл processes.json отправлен клиенту {addr}.")
+                        logging.info(f"Файл processes.json успешно отправлен клиенту {addr}")
+                    except FileNotFoundError:
+                        error_message = "Файл processes.json не найден на сервере."
+                        print(error_message)
+                        logging.error(error_message)
+                        conn.sendall(error_message.encode('utf-8'))  # Отправляем сообщение об ошибке клиенту
+                    except Exception as e:
+                        error_message = f"Ошибка при отправке файла processes.json клиенту: {e}"
+                        print(error_message)
+                        logging.error(error_message)
+                        conn.sendall(error_message.encode('utf-8'))  # Отправляем сообщение об ошибке клиенту
 
-                    if data == "update":
-                        get_process_info()
-                        filename = "processes.json" if DATA_FORMAT == "json" else "processes.xml"
-                        with open(filename, "rb") as f:
-                            conn.sendall(f.read())
+                    break  # Закрываем соединение после отправки данных
+                else:
+                    response = f"Неизвестная команда: {command}"
+                    conn.sendall(response.encode('utf-8'))
+                    logging.warning(f"Клиент {addr} отправил неизвестную команду: {command}")
 
-                    elif data.startswith("signal"):
-                        parts = data.split()
-                        if len(parts) != 3:
-                            conn.sendall("Ошибка: неправильный формат команды".encode())
-                        else:
-                            _, pid, sig = parts
-                            response = handle_signal(pid, sig)
-                            conn.sendall(response.encode())
+            except ConnectionResetError:
+                print(f"Клиент {addr} внезапно разорвал соединение.")
+                logging.warning(f"Клиент {addr} внезапно разорвал соединение.")
+                break
+            except Exception as e:
+                print(f"Ошибка при обработке запроса от клиента {addr}: {e}")
+                logging.error(f"Ошибка при обработке запроса от клиента {addr}: {e}")
+                break  # Выходим из цикла обработки клиента при любой ошибке
 
-                    elif data == "exit":
-                        logging.info("Завершение соединения с клиентом")
-                        break
+    finally:
+        conn.close()
+        print(f"Соединение с клиентом {addr} закрыто.")
+        logging.info(f"Соединение с клиентом {addr} закрыто.")
 
-                    else:
-                        conn.sendall("Ошибка: неизвестная команда".encode())
+
+def server():
+    """Запускает сервер."""
+    host = '127.0.0.1'  # Loopback address (localhost)
+    port = 12345  # Choose a port
+
+    # Создаем IPv4 TCP сокет
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        # Позволяем повторно использовать адрес, если сервер был аварийно завершен
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Привязываем сокет к адресу и порту
+        try:
+            s.bind((host, port))
+        except OSError as e:
+            print(f"Невозможно привязать адрес к порту: {e}")
+            logging.critical(f"Невозможно привязать адрес к порту: {e}")
+            return  # Завершаем работу сервера
+        # Начинаем прослушивать входящие соединения
+        s.listen()
+        print(f"Сервер прослушивает {host}:{port}")
+        logging.info(f"Сервер запущен и прослушивает {host}:{port}")
+
+        try:
+            while True:
+                conn, addr = s.accept()
+                handle_client(conn, addr)
+        except KeyboardInterrupt:
+            print("Сервер завершает работу...")
+            logging.info("Сервер завершает работу по сигналу KeyboardInterrupt.")
+        finally:
+            s.close()
+            logging.info("Сервер остановлен.")
+            print("Сервер остановлен.")
 
 
 if __name__ == "__main__":
-    start_server()
+    server()
