@@ -1,126 +1,135 @@
-import json
-import logging
-import os
-import psutil
+from main import HOST, PORT
 import socket
+import struct
+import os
+import json
+import datetime
+import signal
+import platform
+import subprocess
 
-logging.basicConfig(
-    filename='server.log',
-    level=logging.INFO,
-    format='%(asctime)s - %(message)s'
-)
+HOST = '127.0.0.1'
+PORT = 65432
 
+def log_message(message):
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry = f"[{timestamp}] {message}\n"
+    with open("server.log", "a", encoding="utf-8") as log_file:
+        log_file.write(log_entry)
+    print(message)
 
-def collect_process_data():
-    """Сбор информации о запущенных процессах"""
+def get_process_info():
+    """Получает информацию о процессах в системе (кроссплатформенно)."""
     process_list = []
+    try:
+        if platform.system() == "Windows":
+            # Используем tasklist для получения информации о процессах в Windows
+            tasklist_output = subprocess.check_output(["tasklist"], text=True, encoding="utf-8")
+            for line in tasklist_output.splitlines()[3:]:  # Пропускаем заголовки
+                parts = line.split()
+                if len(parts) >= 2:
+                    process_name = parts[0]
+                    pid = parts[1]
+                    process_list.append({"name": process_name, "pid": pid})
+        else:  # Linux/macOS
+            process_list = os.popen('ps -ax').read().splitlines()
+            process_list = [{"name": process, "pid": "N/A"} for process in process_list]
 
-    for proc in psutil.process_iter(['pid', 'name', 'status']):
-        try:
-            proc_info = proc.info
-            process_list.append(proc_info)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
+    except Exception as e:
+        log_message(f"Ошибка при получении информации о процессах: {e}")
+        return []
 
     return process_list
 
-
-def write_json_file(data, filename='processes.json'):
-    """Запись данных в JSON файл"""
+def send_data(conn, data):
     try:
-        with open(filename, 'w') as f:
-            json.dump(data, f, indent=4)
-        logging.info(f"Сохранено в {filename}")
+        serialized_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        data_len = len(serialized_data)
+        conn.sendall(struct.pack(">I", data_len))
+        conn.sendall(serialized_data)
+        log_message(f"Отправлено {data_len} байт данных")
+
     except Exception as e:
-        logging.error(f"Ошибка сохранения {filename}: {e}")
+        log_message(f"Ошибка при отправке данных: {e}")
 
-
-def process_client_request(connection, address):
-    """Обработка запросов клиента"""
-    logging.info(f"Клиент подключен: {address}")
-    print(f"Клиент {address} подключен")
-
+def receive_data(conn):
     try:
-        while True:
-            try:
-                client_cmd = connection.recv(1024).decode('utf-8').strip()
-                if not client_cmd:
-                    break
+        prefix_size = struct.calcsize(">I")
+        prefix = conn.recv(prefix_size)
 
-                if client_cmd == "update":
-                    print(f"Клиент {address} запросил обновление")
-                    processes = collect_process_data()
-                    write_json_file(processes)
+        if not prefix:
+            log_message("Клиент преждевременно закрыл соединение")
+            return None
 
-                    try:
-                        with open('processes.json', 'rb') as f:
-                            json_data = f.read()
-                        connection.sendall(json_data)
-                        print(f"Данные отправлены {address}")
-                        logging.info(f"Данные отправлены {address}")
-                    except FileNotFoundError:
-                        err_msg = "Файл не найден"
-                        print(err_msg)
-                        logging.error(err_msg)
-                        connection.sendall(err_msg.encode('utf-8'))
-                    except Exception as e:
-                        err_msg = f"Ошибка отправки: {e}"
-                        print(err_msg)
-                        logging.error(err_msg)
-                        connection.sendall(err_msg.encode('utf-8'))
+        (data_len,) = struct.unpack(">I", prefix)
 
-                    break
-                else:
-                    response = f"Неизвестная команда: {client_cmd}"
-                    connection.sendall(response.encode('utf-8'))
-                    logging.warning(f"Неизвестная команда от {address}: {client_cmd}")
+        received_data = b""
+        while len(received_data) < data_len:
+            chunk = conn.recv(min(data_len - len(received_data), 4096))
+            if not chunk:
+                log_message("Клиент преждевременно закрыл соединение")
+                return None
+            received_data += chunk
 
-            except ConnectionResetError:
-                print(f"Клиент {address} отключился")
-                logging.warning(f"Клиент {address} отключился")
-                break
-            except Exception as e:
-                print(f"Ошибка обработки {address}: {e}")
-                logging.error(f"Ошибка обработки {address}: {e}")
-                break
+        return json.loads(received_data.decode("utf-8"))
 
-    finally:
-        connection.close()
-        print(f"Закрыто соединение с {address}")
-        logging.info(f"Закрыто соединение с {address}")
+    except Exception as e:
 
+        log_message(f"Ошибка получения данных: {e}")
+        return None
 
-def start_server():
-    """Запуск сервера"""
-    host = '127.0.0.1'
-    port = 12345
-
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        try:
-            s.bind((host, port))
-        except OSError as e:
-            print(f"Ошибка привязки: {e}")
-            logging.critical(f"Ошибка привязки: {e}")
-            return
-
-        s.listen()
-        print(f"Сервер запущен на {host}:{port}")
-        logging.info(f"Сервер запущен на {host}:{port}")
+def handle_client_request(conn, addr):
+        log_message(f'Подключился клиент {addr}')
 
         try:
             while True:
-                conn, addr = s.accept()
-                process_client_request(conn, addr)
-        except KeyboardInterrupt:
-            print("Остановка сервера...")
-            logging.info("Сервер остановлен")
+                request = receive_data(conn)
+                if not request:
+                    break
+
+                command = request.get("command")
+
+                if command == "get_processes":
+                    process_info = get_process_info()
+                    send_data(conn, process_info)
+
+                elif command == "send_signal":
+                    pid = request.get("pid")
+                    sig = request.get("signal")
+
+                    try:
+                        os.kill(int(pid), getattr(signal, sig))
+                        log_message(f"Отправлен сигнал {sig} процессу с PID {pid}")
+                        send_data(conn, {"status": "ok"})
+
+                    except Exception as e:
+                        log_message(f"Ошибка при отправке сигнала: {e}")
+                        send_data(conn, {"status": "error", "message": str(e)})
+
+                elif command == "close":
+                    log_message("Клиент запросил закрытие соединения.")
+                    break
+
+                else:
+                    log_message(f"Неизвестная команда: {command}")
+                    send_data(conn, {"status": "error", "message": "Неизвестная команда"})
+
+        except Exception as e:
+            log_message(f"Ошибка при обработке запроса клиента: {e}")
+
         finally:
-            s.close()
-            logging.info("Сервер выключен")
-            print("Сервер выключен")
+            conn.close()
+            log_message(f'Соединение с {addr} закрыто')
 
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, PORT))
+        s.listen()
+        log_message(f"Сервер запущен на {HOST}:{PORT}")
 
-if __name__ == "__main__":
-    start_server()
+        while True:
+            try:
+                conn, addr = s.accept()
+                handle_client_request(conn, addr)
+            except Exception as e:
+                log_message(f"Ошибка в основном цикле сервера: {e}")
+                break
